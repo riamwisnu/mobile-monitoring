@@ -1,0 +1,167 @@
+#!/bin/bash
+set -e
+
+echo "🏦 FINTECH MOBILE SECURITY + THREAT INTELLIGENCE"
+
+mkdir -p mobile-security/{backend,dashboard,android-agent,ios-agent}
+cd mobile-security
+
+# ---------------- Docker Compose ----------------
+cat <<EOF > docker-compose.yml
+version: "3.9"
+services:
+  api:
+    image: python:3.11
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+    ports: ["8000:8000"]
+
+  mobsf:
+    image: opensecurity/mobile-security-framework-mobsf
+    ports: ["8001:8000"]
+
+  grafana:
+    image: grafana/grafana
+    ports: ["3000:3000"]
+EOF
+
+# ---------------- Backend ----------------
+cat <<EOF > backend/requirements.txt
+fastapi
+uvicorn
+pydantic
+EOF
+
+cat <<EOF > backend/main.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="Fintech Mobile Security API")
+
+# ---- LOCAL THREAT INTELLIGENCE (BANK SAFE) ----
+KNOWN_FRIDA_IOC = [
+    "frida-server",
+    "re.frida.server",
+    "libfrida"
+]
+
+KNOWN_MALICIOUS_PACKAGES = [
+    "com.topjohnwu.magisk",
+    "com.noshufou.android.su"
+]
+
+class Report(BaseModel):
+    platform: str
+    frida: bool = False
+    xposed: bool = False
+    rooted: bool = False
+    package_name: str = ""
+    binary_name: str = ""
+
+@app.post("/report")
+def report(r: Report):
+    risk = 0
+    intel_hit = False
+
+    if r.frida:
+        risk += 100
+        intel_hit = True
+
+    if r.xposed:
+        risk += 70
+
+    if r.rooted:
+        risk += 40
+
+    if r.package_name in KNOWN_MALICIOUS_PACKAGES:
+        risk += 80
+        intel_hit = True
+
+    if r.binary_name in KNOWN_FRIDA_IOC:
+        risk += 100
+        intel_hit = True
+
+    return {
+        "risk_score": risk,
+        "threat_intel_hit": intel_hit,
+        "action": "KILL_APP" if risk >= 100 else "MONITOR"
+    }
+EOF
+
+# ---------------- Dashboard ----------------
+cat <<EOF > dashboard/index.html
+<!DOCTYPE html>
+<html>
+<body>
+<h2>🏦 Fintech Security SOC Dashboard</h2>
+<ul>
+  <li><a href="http://localhost:8000/docs">Security API</a></li>
+  <li><a href="http://localhost:8001">MobSF</a></li>
+  <li><a href="http://localhost:3000">Grafana</a></li>
+</ul>
+<p>Status: Threat Intelligence ENABLED</p>
+</body>
+</html>
+EOF
+
+# ---------------- ANDROID AGENT ----------------
+cat <<EOF > android-agent/Agent.kt
+package security.agent
+
+import android.os.Process
+import java.io.File
+import kotlin.system.exitProcess
+
+object SecurityAgent {
+
+    private val fridaIndicators = listOf(
+        "/data/local/tmp/frida-server",
+        "/data/local/tmp/re.frida.server"
+    )
+
+    private fun detectFrida(): Boolean =
+        fridaIndicators.any { File(it).exists() }
+
+    fun protect() {
+        if (detectFrida()) {
+            Process.killProcess(Process.myPid())
+            exitProcess(0)
+        }
+    }
+}
+EOF
+
+# ---------------- iOS AGENT ----------------
+cat <<EOF > ios-agent/Agent.swift
+import Foundation
+
+let fridaIOC = [
+    "/usr/sbin/frida-server",
+    "/Library/Frida"
+]
+
+func detectFrida() -> Bool {
+    for path in fridaIOC {
+        if FileManager.default.fileExists(atPath: path) {
+            return true
+        }
+    }
+    return false
+}
+
+func protect() {
+    if detectFrida() {
+        exit(0)
+    }
+}
+EOF
+
+echo "🚀 Starting Fintech Security Stack..."
+docker compose up -d
+
+echo "✅ READY"
+echo "API     : http://localhost:8000/docs"
+echo "MobSF   : http://localhost:8001"
+echo "Grafana : http://localhost:3000"
