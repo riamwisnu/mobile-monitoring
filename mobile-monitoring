@@ -1,33 +1,73 @@
 #!/bin/bash
 set -e
 
-echo "🏦 FINTECH MOBILE SECURITY + THREAT INTELLIGENCE"
+echo "🏦 FINTECH MOBILE SECURITY - ALL IN ONE BOOTSTRAP"
 
+# ================================
+# 1. CHECK & INSTALL DOCKER
+# ================================
+if ! command -v docker >/dev/null 2>&1; then
+  echo "🔧 Docker tidak ditemukan, menginstall..."
+  curl -fsSL https://get.docker.com | sh
+  systemctl start docker
+  systemctl enable docker
+else
+  echo "✅ Docker sudah terinstall"
+fi
+
+# ================================
+# 2. CHECK & INSTALL DOCKER COMPOSE
+# ================================
+if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+  echo "🔧 Docker Compose tidak ditemukan, menginstall..."
+  curl -L "https://github.com/docker/compose/releases/download/v2.25.0/docker-compose-$(uname -s)-$(uname -m)" \
+    -o /usr/local/bin/docker-compose
+  chmod +x /usr/local/bin/docker-compose
+else
+  echo "✅ Docker Compose sudah tersedia"
+fi
+
+# ================================
+# 3. PREPARE DIRECTORY
+# ================================
 mkdir -p mobile-security/{backend,dashboard,android-agent,ios-agent}
 cd mobile-security
 
-# ---------------- Docker Compose ----------------
+# ================================
+# 4. DOCKER COMPOSE STACK
+# ================================
 cat <<EOF > docker-compose.yml
 version: "3.9"
 services:
   api:
     image: python:3.11
+    container_name: fintech-security-api
     volumes:
       - ./backend:/app
     working_dir: /app
     command: bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
-    ports: ["8000:8000"]
+    ports:
+      - "8000:8000"
+    restart: always
 
   mobsf:
     image: opensecurity/mobile-security-framework-mobsf
-    ports: ["8001:8000"]
+    container_name: fintech-mobsf
+    ports:
+      - "8001:8000"
+    restart: always
 
   grafana:
     image: grafana/grafana
-    ports: ["3000:3000"]
+    container_name: fintech-grafana
+    ports:
+      - "3000:3000"
+    restart: always
 EOF
 
-# ---------------- Backend ----------------
+# ================================
+# 5. BACKEND + THREAT INTELLIGENCE
+# ================================
 cat <<EOF > backend/requirements.txt
 fastapi
 uvicorn
@@ -40,14 +80,9 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Fintech Mobile Security API")
 
-# ---- LOCAL THREAT INTELLIGENCE (BANK SAFE) ----
-KNOWN_FRIDA_IOC = [
-    "frida-server",
-    "re.frida.server",
-    "libfrida"
-]
-
-KNOWN_MALICIOUS_PACKAGES = [
+# ---- LOCAL THREAT INTELLIGENCE ----
+FRIDA_IOC = ["frida-server", "libfrida"]
+MALICIOUS_PACKAGES = [
     "com.topjohnwu.magisk",
     "com.noshufou.android.su"
 ]
@@ -68,45 +103,46 @@ def report(r: Report):
     if r.frida:
         risk += 100
         intel_hit = True
-
     if r.xposed:
         risk += 70
-
     if r.rooted:
         risk += 40
-
-    if r.package_name in KNOWN_MALICIOUS_PACKAGES:
+    if r.package_name in MALICIOUS_PACKAGES:
         risk += 80
         intel_hit = True
-
-    if r.binary_name in KNOWN_FRIDA_IOC:
+    if r.binary_name in FRIDA_IOC:
         risk += 100
         intel_hit = True
 
     return {
         "risk_score": risk,
-        "threat_intel_hit": intel_hit,
-        "action": "KILL_APP" if risk >= 100 else "MONITOR"
+        "threat_intel": intel_hit,
+        "action": "KILL_APP" if risk >= 100 else "MONITOR",
+        "soc_severity": "CRITICAL" if risk >= 100 else "INFO"
     }
 EOF
 
-# ---------------- Dashboard ----------------
+# ================================
+# 6. DASHBOARD
+# ================================
 cat <<EOF > dashboard/index.html
 <!DOCTYPE html>
 <html>
 <body>
-<h2>🏦 Fintech Security SOC Dashboard</h2>
+<h2>🏦 Fintech Mobile Security SOC</h2>
 <ul>
   <li><a href="http://localhost:8000/docs">Security API</a></li>
-  <li><a href="http://localhost:8001">MobSF</a></li>
-  <li><a href="http://localhost:3000">Grafana</a></li>
+  <li><a href="http://localhost:8001">MobSF APK/IPA Scanner</a></li>
+  <li><a href="http://localhost:3000">Grafana Dashboard</a></li>
 </ul>
-<p>Status: Threat Intelligence ENABLED</p>
+<p>Status: <b>Threat Intelligence & RASP ENABLED</b></p>
 </body>
 </html>
 EOF
 
-# ---------------- ANDROID AGENT ----------------
+# ================================
+# 7. ANDROID AGENT (AUTO-KILL)
+# ================================
 cat <<EOF > android-agent/Agent.kt
 package security.agent
 
@@ -115,17 +151,13 @@ import java.io.File
 import kotlin.system.exitProcess
 
 object SecurityAgent {
-
-    private val fridaIndicators = listOf(
+    private val fridaPaths = listOf(
         "/data/local/tmp/frida-server",
         "/data/local/tmp/re.frida.server"
     )
 
-    private fun detectFrida(): Boolean =
-        fridaIndicators.any { File(it).exists() }
-
     fun protect() {
-        if (detectFrida()) {
+        if (fridaPaths.any { File(it).exists() }) {
             Process.killProcess(Process.myPid())
             exitProcess(0)
         }
@@ -133,7 +165,9 @@ object SecurityAgent {
 }
 EOF
 
-# ---------------- iOS AGENT ----------------
+# ================================
+# 8. IOS AGENT (AUTO-KILL)
+# ================================
 cat <<EOF > ios-agent/Agent.swift
 import Foundation
 
@@ -142,26 +176,26 @@ let fridaIOC = [
     "/Library/Frida"
 ]
 
-func detectFrida() -> Bool {
+func protect() {
     for path in fridaIOC {
         if FileManager.default.fileExists(atPath: path) {
-            return true
+            exit(0)
         }
-    }
-    return false
-}
-
-func protect() {
-    if detectFrida() {
-        exit(0)
     }
 }
 EOF
 
-echo "🚀 Starting Fintech Security Stack..."
-docker compose up -d
+# ================================
+# 9. RUN STACK
+# ================================
+echo "🚀 Menjalankan Fintech Mobile Security Stack..."
+docker compose up -d || docker-compose up -d
 
-echo "✅ READY"
-echo "API     : http://localhost:8000/docs"
-echo "MobSF   : http://localhost:8001"
-echo "Grafana : http://localhost:3000"
+echo ""
+echo "✅ INSTALLATION & DEPLOYMENT SELESAI"
+echo "-----------------------------------"
+echo "📡 API       : http://localhost:8000/docs"
+echo "🧪 MobSF     : http://localhost:8001"
+echo "📊 Grafana   : http://localhost:3000"
+echo ""
+echo "🔐 Mode      : CONSUMER MOBILE BANKING (FAIL-CLOSED)"
